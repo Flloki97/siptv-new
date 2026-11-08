@@ -31,7 +31,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
-      - name: Resolve and verify the stream
+      - name: Resolve and verify both streams
         run: python3 update_playlist.py public/playlist.m3u
       - name: Check if the published playlist changed
         id: compare
@@ -43,7 +43,7 @@ jobs:
               --output "$RUNNER_TEMP/published.m3u" && \
               cmp -s public/playlist.m3u "$RUNNER_TEMP/published.m3u"; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'Stream playable. Published playlist is current.'
+            echo 'Both streams are playable. Published playlist is current.'
           else
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi

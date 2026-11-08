@@ -1,6 +1,6 @@
 # siptv-new
 
-Kodi playlist for Big Brother VIP Kosova, Kanali 1.
+Kodi playlist for Big Brother VIP Kosova, Kanali 1 and Kanali 2.
 
 ## Kodi setup
 
@@ -14,6 +14,6 @@ The `playlist.m3u` in this repository is a snapshot for initial testing. Use the
 
 ## Updates
 
-The GitHub Actions workflow is scheduled to check the current HLS feed every five minutes. It decodes a video frame and publishes a fresh playlist when the stream URL changes. Failed checks appear in Actions and leave the last published playlist available.
+The GitHub Actions workflow is scheduled to check both HLS feeds every five minutes. It decodes a video frame from each channel and publishes a fresh playlist when either stream URL changes. If a check fails, Actions identifies the affected channel and keeps the last published playlist available.
 
 On a new repository, select **GitHub Actions** under **Settings → Pages → Source**, then run **Check and publish Kodi playlist** from the **Actions** tab. GitHub may delay scheduled runs and disables them after 60 days of inactivity in public repositories.

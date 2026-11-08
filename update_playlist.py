@@ -1,4 +1,4 @@
-"""Resolve the public player URL, verify video, and generate Kodi's playlist."""
+"""Resolve both public streams, verify video, and generate Kodi's playlist."""
 
 import json
 from pathlib import Path
@@ -6,13 +6,14 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
-PLAYER_API = "https://s1.bbvipks.com/fetch_m3u8_1.php"
-CHANNEL = "Big Brother VIP Kosova - Kanali 1"
+PLAYER_API = "https://s1.bbvipks.com/fetch_m3u8_{channel}.php"
+CHANNELS = (1, 2)
 
 
-def resolve_stream():
+def resolve_stream(channel):
+    player_api = PLAYER_API.format(channel=channel)
     response = subprocess.run(
-        ["curl", "--fail", "--silent", "--show-error", "--max-time", "15", PLAYER_API],
+        ["curl", "--fail", "--silent", "--show-error", "--max-time", "15", player_api],
         capture_output=True,
         check=True,
     )
@@ -54,18 +55,25 @@ def verify_video(stream):
 
 
 def main():
-    try:
-        stream = resolve_stream()
-        verify_video(stream)
-    except subprocess.CalledProcessError as error:
-        sys.exit(f"Player API request failed: {error.stderr.decode(errors='replace').strip()}")
-    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-        sys.exit(f"Playlist check failed: {error}")
+    playlist = ["#EXTM3U"]
+    for channel in CHANNELS:
+        name = f"Big Brother VIP Kosova - Kanali {channel}"
+        try:
+            stream = resolve_stream(channel)
+            verify_video(stream)
+        except subprocess.CalledProcessError as error:
+            detail = error.stderr.decode(errors="replace").strip()
+            sys.exit(f"{name}: Player API request failed: {detail}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            sys.exit(f"{name}: Playlist check failed: {error}")
+
+        playlist.extend((f"#EXTINF:-1,{name}", stream))
+        print(f"{name}: Decoded a video frame.")
 
     output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("playlist.m3u")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(f"#EXTM3U\n#EXTINF:-1,{CHANNEL}\n{stream}\n", encoding="utf-8")
-    print("Decoded a video frame and generated the Kodi playlist.")
+    output.write_text("\n".join(playlist) + "\n", encoding="utf-8")
+    print("Generated the two-channel Kodi playlist.")
 
 
 if __name__ == "__main__":
