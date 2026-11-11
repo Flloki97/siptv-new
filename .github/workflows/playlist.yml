@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '3-58/5 * * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - update_playlist.py
+      - .github/workflows/playlist.yml
 
 concurrency:
   group: github-pages-playlist
@@ -31,19 +36,21 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
-      - name: Resolve and verify both streams
-        run: python3 update_playlist.py public/playlist.m3u
-      - name: Check if the published playlist changed
-        id: compare
+      - name: Download the currently published playlist
         env:
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
         run: |
-          if curl --fail --silent --show-error --location --max-time 15 \
-              "${PAGES_URL%/}/playlist.m3u?check=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-              --output "$RUNNER_TEMP/published.m3u" && \
-              cmp -s public/playlist.m3u "$RUNNER_TEMP/published.m3u"; then
+          curl --fail --silent --show-error --location --max-time 15 \
+            "${PAGES_URL%/}/playlist.m3u?check=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --output "$RUNNER_TEMP/published.m3u" || rm -f "$RUNNER_TEMP/published.m3u"
+      - name: Discover and verify the backup players
+        run: python3 update_playlist.py public/playlist.m3u "$RUNNER_TEMP/published.m3u"
+      - name: Check if the published playlist changed
+        id: compare
+        run: |
+          if cmp -s public/playlist.m3u "$RUNNER_TEMP/published.m3u"; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'Both streams are playable. Published playlist is current.'
+            echo 'Published playlist is current.'
           else
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi

@@ -4,7 +4,7 @@ Kodi playlist for Big Brother VIP Kosova, Kanali 1 and Kanali 2.
 
 ## Kodi setup
 
-Once GitHub Pages has deployed, use this URL in **IPTV Simple Client → Configure → General → M3U play list URL**.
+Use IPTV Simple Client 21.11.0 or newer for Kodi 21. For Kodi 22, use IPTV Simple Client 22.5.0 or newer. Use this URL in **IPTV Simple Client → Configure → General → M3U play list URL**.
 
 `https://flloki97.github.io/siptv-new/playlist.m3u`
 
@@ -14,6 +14,6 @@ The `playlist.m3u` in this repository is a snapshot for initial testing. Use the
 
 ## Updates
 
-The GitHub Actions workflow is scheduled to check both HLS feeds every five minutes. It decodes a video frame from each channel and publishes a fresh playlist when either stream URL changes. If a check fails, Actions identifies the affected channel and keeps the last published playlist available.
+Kodi gets a fresh HLS URL from the public backup player whenever you tune in. The GitHub Actions workflow is scheduled to check for backup player changes every five minutes. It verifies a video frame before updating that channel. If a channel check fails, the workflow keeps its previous entry while allowing the other channel to update.
 
 On a new repository, select **GitHub Actions** under **Settings → Pages → Source**, then run **Check and publish Kodi playlist** from the **Actions** tab. GitHub may delay scheduled runs and disables them after 60 days of inactivity in public repositories.
