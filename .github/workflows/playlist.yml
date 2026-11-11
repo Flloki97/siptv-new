@@ -36,30 +36,45 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
-      - name: Download the currently published playlist
+      - name: Download the currently published playlists
         env:
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
         run: |
-          curl --fail --silent --show-error --location --max-time 15 \
-            "${PAGES_URL%/}/playlist.m3u?check=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --output "$RUNNER_TEMP/published.m3u" || rm -f "$RUNNER_TEMP/published.m3u"
-      - name: Discover and verify the backup players
-        run: python3 update_playlist.py public/playlist.m3u "$RUNNER_TEMP/published.m3u"
-      - name: Check if the published playlist changed
+          for file in playlist.m3u stremio.m3u; do
+            status=$(curl --silent --show-error --location --max-time 15 \
+              "${PAGES_URL%/}/$file?check=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --output "$RUNNER_TEMP/$file" --write-out '%{http_code}')
+            case "$status" in
+              200) ;;
+              404) rm -f "$RUNNER_TEMP/$file" ;;
+              *) echo "Could not load $file (HTTP $status)." >&2; exit 1 ;;
+            esac
+          done
+      - name: Discover and verify the Kodi streams
+        run: |
+          mkdir -p public
+          python3 update_playlist.py public/playlist.m3u "$RUNNER_TEMP/playlist.m3u" || \
+            cp "$RUNNER_TEMP/playlist.m3u" public/playlist.m3u
+      - name: Discover and verify the Stremio streams
+        run: |
+          python3 update_playlist.py --stremio public/stremio.m3u "$RUNNER_TEMP/stremio.m3u" || \
+            cp "$RUNNER_TEMP/stremio.m3u" public/stremio.m3u
+      - name: Check if either published playlist changed
         id: compare
         run: |
-          if cmp -s public/playlist.m3u "$RUNNER_TEMP/published.m3u"; then
+          if cmp -s public/playlist.m3u "$RUNNER_TEMP/playlist.m3u" && \
+             cmp -s public/stremio.m3u "$RUNNER_TEMP/stremio.m3u"; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'Published playlist is current.'
+            echo 'Both published playlists are current.'
           else
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
-      - name: Upload playlist
+      - name: Upload playlists
         if: steps.compare.outputs.changed == 'true'
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
-      - name: Deploy playlist
+      - name: Deploy playlists
         if: steps.compare.outputs.changed == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
