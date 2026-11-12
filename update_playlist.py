@@ -4,11 +4,11 @@ from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from html.parser import HTMLParser
-import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import urljoin, urlsplit
 
 
@@ -18,8 +18,9 @@ CHANNEL_PAGES = {
 }
 PLAYER_HOST = "s1.bbvipks.com"
 EMBED_HOST = "ok.ru"
-STREMIO_CONFIG = "https://bbvip.live/api.php?action=config"
-STREMIO_CDN = "moldova-dns.xyz"
+BACKUP_CDN = "okcdn.ru"
+STREMIO_RESOLUTION = "852x480"
+STREMIO_RENEWAL_MARGIN = 18 * 60 * 60
 HLS_PATTERN = r"hlsMasterPlaylistUrl&quot;\s*:\s*&quot;(https://[^&<>\s]+)"
 CHANNEL_NAME = "Big Brother VIP Kosova - Kanali "
 
@@ -105,14 +106,22 @@ def hls_lines(url, domain):
     return lines
 
 
-def verify_video(master, domain):
+def verify_video(master, domain, preferred_resolution=None):
     master_lines = hls_lines(master, domain)
     variants = [
-        line for tag, line in zip(master_lines, master_lines[1:])
+        (tag, line) for tag, line in zip(master_lines, master_lines[1:])
         if tag.startswith("#EXT-X-STREAM-INF:") and not line.startswith("#")
     ]
     if variants:
-        media = urljoin(master, variants[1] if len(variants) > 1 else variants[0])
+        default_variant = variants[1] if len(variants) > 1 else variants[0]
+        variant = next(
+            (
+                line for tag, line in variants
+                if f"RESOLUTION={preferred_resolution}" in tag.partition(":")[2].split(",")
+            ),
+            default_variant[1],
+        )
+        media = urljoin(master, variant)
         media_lines = hls_lines(media, domain)
     elif any(line.startswith("#EXTINF:") for line in master_lines):
         media, media_lines = master, master_lines
@@ -136,42 +145,46 @@ def verify_video(master, domain):
     )
     if result.returncode or not any(line.startswith(b"0,") for line in result.stdout.splitlines()):
         raise ValueError("The live segment did not deliver a decodable video frame")
+    return media
+
+
+def backup_master(embed):
+    match = re.search(HLS_PATTERN, page(embed))
+    if not match:
+        raise ValueError("The backup player did not supply an HLS URL")
+    return match.group(1)
 
 
 def channel_entry(channel):
     embed = find_embed(channel)
-    match = re.search(HLS_PATTERN, page(embed))
-    if not match:
-        raise ValueError("The backup player did not supply an HLS URL")
-    verify_video(match.group(1), "okcdn.ru")
+    verify_video(backup_master(embed), BACKUP_CDN)
     print(f"Kanali {channel}: verified a frame from the backup player.")
     return f'#EXTINF:-1,{CHANNEL_NAME}{channel}\n#WEBPROP:web-regex={HLS_PATTERN}\n@{embed}\n'
 
 
-def stremio_entry(channel):
-    response = json.loads(page(STREMIO_CONFIG))
-    try:
-        sources = response["config"]["channel_configs"]
-        settings = next(
-            item for item in sources
-            if re.fullmatch(rf"kanali?\s+{channel}", item["label"], flags=re.IGNORECASE)
-        )
-        streams = [source["url"] for source in settings["servers"]]
-    except (KeyError, TypeError, StopIteration) as error:
-        raise ValueError("The Stremio source did not list this channel") from error
+def stremio_entry(channel, previous):
+    master = backup_master(find_embed(channel))
+    stream = previous.strip().split("\n")[-1]
+    path = urlsplit(stream).path
+    expiration = re.search(r"/expires/(\d{13})/", path)
+    same_stream = path.split("/sig/", 1)[0] == urlsplit(master).path.split("/sig/", 1)[0]
+    if (
+        is_hls_host(stream, BACKUP_CDN)
+        and same_stream
+        and expiration
+        and int(expiration[1]) / 1000 - time.time() > STREMIO_RENEWAL_MARGIN
+    ):
+        try:
+            verify_video(stream, BACKUP_CDN)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        else:
+            print(f"Kanali {channel}: verified the published BBVIPKS.COM Stremio feed.")
+            return previous
 
-    for stream in streams:
-        if not isinstance(stream, str) or any(c.isspace() for c in stream):
-            continue
-        parsed = urlsplit(stream)
-        if parsed.query or parsed.fragment or not parsed.path.endswith(".m3u8"):
-            continue
-        if is_hls_host(stream, STREMIO_CDN):
-            verify_video(stream, STREMIO_CDN)
-            print(f"Kanali {channel}: verified a frame from the direct Stremio stream.")
-            return f'#EXTINF:-1 group-title="Live TV",{CHANNEL_NAME}{channel}\n{stream}\n'
-
-    raise ValueError("The Stremio source did not supply a stable direct HLS URL")
+    stream = verify_video(master, BACKUP_CDN, preferred_resolution=STREMIO_RESOLUTION)
+    print(f"Kanali {channel}: verified a fresh BBVIPKS.COM Stremio feed.")
+    return f'#EXTINF:-1 group-title="Live TV",{CHANNEL_NAME}{channel}\n{stream}\n'
 
 
 def previous_entries(path):
@@ -193,12 +206,17 @@ def main():
     parser.add_argument("previous", nargs="?", type=Path)
     parser.add_argument("--stremio", action="store_true")
     args = parser.parse_args()
-    entry_builder = stremio_entry if args.stremio else channel_entry
     output = args.output
     prior = previous_entries(args.previous)
     entries = {}
     with ThreadPoolExecutor(max_workers=len(CHANNEL_PAGES)) as pool:
-        jobs = {channel: pool.submit(entry_builder, channel) for channel in CHANNEL_PAGES}
+        if args.stremio:
+            jobs = {
+                channel: pool.submit(stremio_entry, channel, prior.get(channel, ""))
+                for channel in CHANNEL_PAGES
+            }
+        else:
+            jobs = {channel: pool.submit(channel_entry, channel) for channel in CHANNEL_PAGES}
         for channel, job in jobs.items():
             try:
                 entries[channel] = job.result()
