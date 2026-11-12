@@ -51,10 +51,15 @@ jobs:
             esac
           done
       - name: Discover and verify the Kodi streams
+        id: kodi
         run: |
           mkdir -p public
-          python3 update_playlist.py public/playlist.m3u "$RUNNER_TEMP/playlist.m3u" || \
-            cp "$RUNNER_TEMP/playlist.m3u" public/playlist.m3u
+          if ! python3 update_playlist.py public/playlist.m3u "$RUNNER_TEMP/playlist.m3u"; then
+            echo 'outage=true' >> "$GITHUB_OUTPUT"
+            if [ ! -f public/playlist.m3u ]; then
+              cp "$RUNNER_TEMP/playlist.m3u" public/playlist.m3u
+            fi
+          fi
       - name: Discover and verify the Stremio streams
         run: |
           python3 update_playlist.py --stremio public/stremio.m3u "$RUNNER_TEMP/stremio.m3u" || \
@@ -78,3 +83,8 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Report an unresolved Kodi outage
+        if: steps.kodi.outputs.outage == 'true'
+        run: |
+          echo 'A Kodi channel failed checks against both providers. See the stream check logs.' >&2
+          exit 1

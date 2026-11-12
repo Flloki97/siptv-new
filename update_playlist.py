@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +20,8 @@ CHANNEL_PAGES = {
 PLAYER_HOST = "s1.bbvipks.com"
 EMBED_HOST = "ok.ru"
 BACKUP_CDN = "okcdn.ru"
+KODI_FALLBACK_CONFIG = "https://bbvip.live/api.php?action=config"
+KODI_FALLBACK_CDN = "moldova-dns.xyz"
 STREMIO_RESOLUTION = "852x480"
 STREMIO_RENEWAL_MARGIN = 18 * 60 * 60
 HLS_PATTERN = r"hlsMasterPlaylistUrl&quot;\s*:\s*&quot;(https://[^&<>\s]+)"
@@ -64,6 +67,12 @@ def secure_url(url, host):
     return parsed.scheme == "https" and parsed.netloc.lower() == host
 
 
+def is_backup_embed(url):
+    return secure_url(url, EMBED_HOST) and re.fullmatch(
+        r"/videoembed/\d+/?", urlsplit(url).path
+    ) is not None
+
+
 def find_embed(channel):
     channel_url = CHANNEL_PAGES[channel]
     for hub in Iframes(page(channel_url), channel_url).urls:
@@ -78,9 +87,7 @@ def find_embed(channel):
             if not secure_url(player_url, PLAYER_HOST):
                 continue
             for embed in Iframes(page(player_url), player_url).urls:
-                if secure_url(embed, EMBED_HOST) and re.fullmatch(
-                    r"/videoembed/\d+/?", urlsplit(embed).path
-                ):
+                if is_backup_embed(embed):
                     return embed
 
     raise ValueError("The channel page does not list a supported backup player")
@@ -155,11 +162,46 @@ def backup_master(embed):
     return match.group(1)
 
 
+def fallback_kodi_source(channel):
+    response = json.loads(page(KODI_FALLBACK_CONFIG))
+    try:
+        settings = next(
+            item for item in response["config"]["channel_configs"]
+            if re.fullmatch(rf"kanali?\s+{channel}", item["label"], flags=re.IGNORECASE)
+        )
+        urls = [source["url"] for source in settings["servers"]]
+    except (KeyError, TypeError, StopIteration) as error:
+        raise ValueError("BBVIP.LIVE did not list this channel") from error
+
+    for url in urls:
+        if not isinstance(url, str) or any(char.isspace() for char in url):
+            continue
+        try:
+            if is_backup_embed(url):
+                verify_video(backup_master(url), BACKUP_CDN)
+                return url, True
+            if is_hls_host(url, KODI_FALLBACK_CDN) and urlsplit(url).path.endswith(".m3u8"):
+                verify_video(url, KODI_FALLBACK_CDN)
+                return url, False
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+
+    raise ValueError("BBVIP.LIVE has no playable fallback for this channel")
+
+
 def channel_entry(channel):
-    embed = find_embed(channel)
-    verify_video(backup_master(embed), BACKUP_CDN)
-    print(f"Kanali {channel}: verified a frame from the backup player.")
-    return f'#EXTINF:-1,{CHANNEL_NAME}{channel}\n#WEBPROP:web-regex={HLS_PATTERN}\n@{embed}\n'
+    try:
+        url = find_embed(channel)
+        verify_video(backup_master(url), BACKUP_CDN)
+        is_embed = True
+        print(f"Kanali {channel}: verified the preferred BBVIPKS.COM feed.")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"::warning::Kanali {channel}: BBVIPKS.COM unavailable ({error}).", file=sys.stderr)
+        url, is_embed = fallback_kodi_source(channel)
+        print(f"Kanali {channel}: verified the BBVIP.LIVE fallback.")
+
+    stream = f"#WEBPROP:web-regex={HLS_PATTERN}\n@{url}" if is_embed else url
+    return f"#EXTINF:-1,{CHANNEL_NAME}{channel}\n{stream}\n"
 
 
 def stremio_entry(channel, previous):
@@ -231,6 +273,8 @@ def main():
         "#EXTM3U\n" + "".join(entries.get(channel) or prior[channel] for channel in CHANNEL_PAGES),
         encoding="utf-8",
     )
+    if not args.stremio and len(entries) != len(CHANNEL_PAGES):
+        sys.exit("A Kodi channel is unavailable from both sources. Its previous entry was retained.")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ In M3U Mux, add `https://flloki97.github.io/siptv-new/stremio.m3u` as an **M3U U
 
 ## Updates
 
-Kodi gets a fresh HLS URL from the public backup player whenever you tune in. The GitHub Actions workflow is scheduled to check for backup player changes every five minutes. It verifies a video frame before updating that channel. If a channel check fails, the workflow keeps its previous entry while allowing the other channel to update.
+Kodi gets a fresh HLS URL when tuning to a web player. GitHub Actions is scheduled to check both channels every five minutes. It prefers BBVIPKS.COM, switches an affected Kodi channel to a verified BBVIP.LIVE feed during an outage, and restores the preferred feed once it plays again. If both sources fail, the run reports the outage and retains that channel's previous entry while allowing the other channel to update.
 
 The same workflow checks the BBVIPKS.COM backup players for Stremio. It selects a 480p HLS rendition when available and renews expiring stream URLs during scheduled checks.
 
