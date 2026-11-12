@@ -2,6 +2,7 @@
 
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from functools import cache
 from html.parser import HTMLParser
 import json
@@ -20,8 +21,8 @@ CHANNEL_PAGES = {
 PLAYER_HOST = "s1.bbvipks.com"
 EMBED_HOST = "ok.ru"
 BACKUP_CDN = "okcdn.ru"
-KODI_FALLBACK_CONFIG = "https://bbvip.live/api.php?action=config"
-KODI_FALLBACK_CDN = "moldova-dns.xyz"
+FALLBACK_CONFIG = "https://bbvip.live/api.php?action=config"
+FALLBACK_CDN = "moldova-dns.xyz"
 STREMIO_RESOLUTION = "852x480"
 STREMIO_RENEWAL_MARGIN = 18 * 60 * 60
 HLS_PATTERN = r"hlsMasterPlaylistUrl&quot;\s*:\s*&quot;(https://[^&<>\s]+)"
@@ -113,6 +114,22 @@ def hls_lines(url, domain):
     return lines
 
 
+def check_live_window(lines):
+    if "#EXT-X-ENDLIST" in lines:
+        raise ValueError("The live playlist has ended")
+
+    latest_end = None
+    for line in lines:
+        if line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            stamp = datetime.fromisoformat(line.partition(":")[2].replace("Z", "+00:00"))
+            latest_end = stamp.timestamp() if stamp.utcoffset() is not None else None
+        elif latest_end is not None and line.startswith("#EXTINF:"):
+            latest_end += float(line.partition(":")[2].partition(",")[0])
+
+    if latest_end is not None and time.time() - latest_end > 90:
+        raise ValueError("The live playlist has not published recent video")
+
+
 def verify_video(master, domain, preferred_resolution=None):
     master_lines = hls_lines(master, domain)
     variants = [
@@ -134,6 +151,7 @@ def verify_video(master, domain, preferred_resolution=None):
         media, media_lines = master, master_lines
     else:
         raise ValueError("The HLS master playlist has no video variants")
+    check_live_window(media_lines)
     segments = [line for line in media_lines if not line.startswith("#")]
     if not segments:
         raise ValueError("The live playlist has no video segments")
@@ -162,8 +180,8 @@ def backup_master(embed):
     return match.group(1)
 
 
-def fallback_kodi_source(channel):
-    response = json.loads(page(KODI_FALLBACK_CONFIG))
+def fallback_source(channel, stremio_stream=None):
+    response = json.loads(page(FALLBACK_CONFIG))
     try:
         settings = next(
             item for item in response["config"]["channel_configs"]
@@ -178,10 +196,13 @@ def fallback_kodi_source(channel):
             continue
         try:
             if is_backup_embed(url):
-                verify_video(backup_master(url), BACKUP_CDN)
+                master = backup_master(url)
+                if stremio_stream is not None:
+                    return verified_stremio_stream(master, stremio_stream), False
+                verify_video(master, BACKUP_CDN)
                 return url, True
-            if is_hls_host(url, KODI_FALLBACK_CDN) and urlsplit(url).path.endswith(".m3u8"):
-                verify_video(url, KODI_FALLBACK_CDN)
+            if is_hls_host(url, FALLBACK_CDN) and urlsplit(url).path.endswith(".m3u8"):
+                verify_video(url, FALLBACK_CDN)
                 return url, False
         except (OSError, ValueError, subprocess.TimeoutExpired):
             continue
@@ -197,16 +218,14 @@ def channel_entry(channel):
         print(f"Kanali {channel}: verified the preferred BBVIPKS.COM feed.")
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"::warning::Kanali {channel}: BBVIPKS.COM unavailable ({error}).", file=sys.stderr)
-        url, is_embed = fallback_kodi_source(channel)
+        url, is_embed = fallback_source(channel)
         print(f"Kanali {channel}: verified the BBVIP.LIVE fallback.")
 
     stream = f"#WEBPROP:web-regex={HLS_PATTERN}\n@{url}" if is_embed else url
     return f"#EXTINF:-1,{CHANNEL_NAME}{channel}\n{stream}\n"
 
 
-def stremio_entry(channel, previous):
-    master = backup_master(find_embed(channel))
-    stream = previous.strip().split("\n")[-1]
+def verified_stremio_stream(master, stream):
     path = urlsplit(stream).path
     expiration = re.search(r"/expires/(\d{13})/", path)
     same_stream = path.split("/sig/", 1)[0] == urlsplit(master).path.split("/sig/", 1)[0]
@@ -221,11 +240,22 @@ def stremio_entry(channel, previous):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         else:
-            print(f"Kanali {channel}: verified the published BBVIPKS.COM Stremio feed.")
-            return previous
+            return stream
 
-    stream = verify_video(master, BACKUP_CDN, preferred_resolution=STREMIO_RESOLUTION)
-    print(f"Kanali {channel}: verified a fresh BBVIPKS.COM Stremio feed.")
+    return verify_video(master, BACKUP_CDN, preferred_resolution=STREMIO_RESOLUTION)
+
+
+def stremio_entry(channel, previous):
+    stream = previous.strip().split("\n")[-1]
+    try:
+        master = backup_master(find_embed(channel))
+        stream = verified_stremio_stream(master, stream)
+        print(f"Kanali {channel}: verified the preferred BBVIPKS.COM feed for Stremio.")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"::warning::Kanali {channel}: BBVIPKS.COM unavailable for Stremio ({error}).", file=sys.stderr)
+        stream, _ = fallback_source(channel, stremio_stream=stream)
+        print(f"Kanali {channel}: verified the BBVIP.LIVE fallback for Stremio.")
+
     return f'#EXTINF:-1 group-title="Live TV",{CHANNEL_NAME}{channel}\n{stream}\n'
 
 
@@ -273,8 +303,9 @@ def main():
         "#EXTM3U\n" + "".join(entries.get(channel) or prior[channel] for channel in CHANNEL_PAGES),
         encoding="utf-8",
     )
-    if not args.stremio and len(entries) != len(CHANNEL_PAGES):
-        sys.exit("A Kodi channel is unavailable from both sources. Its previous entry was retained.")
+    if len(entries) != len(CHANNEL_PAGES):
+        client = "Stremio" if args.stremio else "Kodi"
+        sys.exit(f"A {client} channel is unavailable from both sources. Its previous entry was retained.")
 
 
 if __name__ == "__main__":

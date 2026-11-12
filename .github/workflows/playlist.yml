@@ -61,9 +61,14 @@ jobs:
             fi
           fi
       - name: Discover and verify the Stremio streams
+        id: stremio
         run: |
-          python3 update_playlist.py --stremio public/stremio.m3u "$RUNNER_TEMP/stremio.m3u" || \
-            cp "$RUNNER_TEMP/stremio.m3u" public/stremio.m3u
+          if ! python3 update_playlist.py --stremio public/stremio.m3u "$RUNNER_TEMP/stremio.m3u"; then
+            echo 'outage=true' >> "$GITHUB_OUTPUT"
+            if [ ! -f public/stremio.m3u ]; then
+              cp "$RUNNER_TEMP/stremio.m3u" public/stremio.m3u
+            fi
+          fi
       - name: Check if either published playlist changed
         id: compare
         run: |
@@ -83,8 +88,8 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
-      - name: Report an unresolved Kodi outage
-        if: steps.kodi.outputs.outage == 'true'
+      - name: Report an unresolved stream outage
+        if: steps.kodi.outputs.outage == 'true' || steps.stremio.outputs.outage == 'true'
         run: |
-          echo 'A Kodi channel failed checks against both providers. See the stream check logs.' >&2
+          echo 'A channel failed checks against both providers. See the stream check logs.' >&2
           exit 1
