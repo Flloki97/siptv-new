@@ -19,6 +19,7 @@ CHANNEL_PAGES = {
     2: "https://bbvipks.com/kanali-2-live-big-brother-kosova-live-u4o1x/",
 }
 PLAYER_HOST = "s1.bbvipks.com"
+PRIMARY_CDN = "bigbrothervipalbania4.net"
 EMBED_HOST = "ok.ru"
 BACKUP_CDN = "okcdn.ru"
 FALLBACK_CONFIG = "https://bbvip.live/api.php?action=config"
@@ -49,13 +50,18 @@ def fetch(url):
         [
             "curl", "--fail", "--silent", "--show-error", "--location",
             "--proto", "=https", "--proto-redir", "=https",
-            "--max-time", "15", "--max-filesize", "12000000", url,
+            "--max-time", "15", "--max-filesize", "12000000",
+            "--write-out", "\n%{http_code}", url,
         ],
         capture_output=True,
     )
+    body, _, status = result.stdout.rpartition(b"\n")
     if result.returncode:
-        raise ValueError(f"{urlsplit(url).hostname}: curl exit {result.returncode}")
-    return result.stdout
+        code = status.decode("ascii", errors="replace")
+        raise ValueError(
+            f"{urlsplit(url).hostname}: HTTP {code}, curl exit {result.returncode}"
+        )
+    return body
 
 
 @cache
@@ -74,7 +80,7 @@ def is_backup_embed(url):
     ) is not None
 
 
-def find_embed(channel):
+def preferred_sources(channel):
     channel_url = CHANNEL_PAGES[channel]
     for hub in Iframes(page(channel_url), channel_url).urls:
         if not secure_url(hub, PLAYER_HOST):
@@ -87,11 +93,50 @@ def find_embed(channel):
             player_url = urljoin(hub, link)
             if not secure_url(player_url, PLAYER_HOST):
                 continue
-            for embed in Iframes(page(player_url), player_url).urls:
-                if is_backup_embed(embed):
-                    return embed
+            try:
+                player = page(player_url)
+                endpoint = re.search(
+                    r"""xhr\.open\(\s*['"]GET['"]\s*,\s*['"]([^'"]+)['"]""",
+                    player,
+                )
+                if endpoint:
+                    api_url = urljoin(player_url, endpoint[1])
+                    if secure_url(api_url, PLAYER_HOST):
+                        stream = json.loads(page(api_url)).get("url")
+                        if isinstance(stream, str) and is_hls_host(stream, PRIMARY_CDN):
+                            yield stream, False
+                for embed in Iframes(player, player_url).urls:
+                    if is_backup_embed(embed):
+                        yield embed, True
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                print(
+                    f"::warning::Kanali {channel}: player discovery failed ({error}).",
+                    file=sys.stderr,
+                )
 
-    raise ValueError("The channel page does not list a supported backup player")
+
+def preferred_source(channel, previous=None):
+    for url, is_embed in preferred_sources(channel):
+        try:
+            if is_embed:
+                master = backup_master(url)
+                if previous is not None:
+                    return verified_stremio_stream(master, previous), False
+                verify_video(master, BACKUP_CDN)
+            else:
+                media = verify_video(
+                    url, PRIMARY_CDN,
+                    preferred_resolution=STREMIO_RESOLUTION if previous is not None else None,
+                )
+                if previous is not None:
+                    return media, False
+            return url, is_embed
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(
+                f"::warning::Kanali {channel}: BBVIPKS.COM player failed ({error}).",
+                file=sys.stderr,
+            )
+    raise ValueError("BBVIPKS.COM has no playable supported player")
 
 
 def is_hls_host(url, domain):
@@ -212,9 +257,7 @@ def fallback_source(channel, stremio_stream=None):
 
 def channel_entry(channel):
     try:
-        url = find_embed(channel)
-        verify_video(backup_master(url), BACKUP_CDN)
-        is_embed = True
+        url, is_embed = preferred_source(channel)
         print(f"Kanali {channel}: verified the preferred BBVIPKS.COM feed.")
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"::warning::Kanali {channel}: BBVIPKS.COM unavailable ({error}).", file=sys.stderr)
@@ -248,8 +291,7 @@ def verified_stremio_stream(master, stream):
 def stremio_entry(channel, previous):
     stream = previous.strip().split("\n")[-1]
     try:
-        master = backup_master(find_embed(channel))
-        stream = verified_stremio_stream(master, stream)
+        stream, _ = preferred_source(channel, previous=stream)
         print(f"Kanali {channel}: verified the preferred BBVIPKS.COM feed for Stremio.")
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"::warning::Kanali {channel}: BBVIPKS.COM unavailable for Stremio ({error}).", file=sys.stderr)
@@ -310,3 +352,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

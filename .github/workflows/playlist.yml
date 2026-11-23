@@ -75,7 +75,7 @@ jobs:
           if cmp -s public/playlist.m3u "$RUNNER_TEMP/playlist.m3u" && \
              cmp -s public/stremio.m3u "$RUNNER_TEMP/stremio.m3u"; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'Both published playlists are current.'
+            echo 'Both playlist files match the previous publication.'
           else
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
@@ -92,4 +92,6 @@ jobs:
         if: steps.kodi.outputs.outage == 'true' || steps.stremio.outputs.outage == 'true'
         run: |
           echo 'A channel failed checks against both providers. See the stream check logs.' >&2
+          echo '## Stream checks failed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The previous channel entries were retained where new feeds could not be verified. Check the discovery logs for provider errors.' >> "$GITHUB_STEP_SUMMARY"
           exit 1
